@@ -1,0 +1,862 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TaxGen AI v2.0: Advanced 7-Step Filing Flow</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        // Set Tailwind config for Inter font
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                    animation: {
+                        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                    }
+                }
+            }
+        }
+    </script>
+    <!-- jsPDF and html2canvas for client-side PDF generation -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    
+    <!-- Firebase Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // Firestore logging for debugging
+        // setLogLevel('Debug'); // Uncomment for deep debugging
+
+        // Global variables for Firebase access
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app, db, auth, userId = null;
+
+        // Promise to ensure Firebase setup is complete before running dependent logic
+        window.firebaseReady = new Promise(async (resolve) => {
+            try {
+                if (Object.keys(firebaseConfig).length === 0) throw new Error("Firebase config is missing.");
+
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                // Expose necessary Firestore functions to the global scope (window)
+                window.onSnapshot = onSnapshot;
+                window.setDoc = setDoc;
+                window.doc = doc;
+
+                // Authentication (awaiting sign-in for initial user object)
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                // Wait for the auth state to be confirmed
+                const unsubscribe = onAuthStateChanged(auth, (user) => {
+                    unsubscribe(); // Stop listening after the first event
+                    if (user) {
+                        userId = user.uid;
+                        console.log("Firebase Auth & Firestore Initialized for user:", userId);
+                        window.db = db;
+                        window.userId = userId;
+                        // MANDATORY Firestore path for private user data
+                        window.ITR_DOC_REF = doc(db, 'artifacts', appId, 'users', userId, 'ITRData', 'current_session');
+                        resolve();
+                    } else {
+                        // Fallback using random UUID if auth fails
+                        userId = crypto.randomUUID();
+                        console.warn("User not authenticated, falling back to random UUID:", userId);
+                        window.db = db;
+                        window.userId = userId;
+                        window.ITR_DOC_REF = doc(db, 'artifacts', appId, 'users', userId, 'ITRData', 'current_session');
+                        resolve();
+                    }
+                });
+
+            } catch (error) {
+                console.error("Firebase Initialization Error:", error);
+                // Resolve even on error to allow the rest of the application to load
+                resolve(); 
+            }
+        });
+    </script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #f8fafc; color: #1e293b; }
+        .shadow-indigo { box-shadow: 0 10px 15px -3px rgba(99, 102, 241, 0.1), 0 4px 6px -2px rgba(99, 102, 241, 0.05); }
+
+        /* Flow Indicator Styling */
+        .flow-step {
+            transition: all 0.5s ease;
+            opacity: 0.6; /* Default opacity for incomplete steps */
+            transform: scale(0.99);
+            cursor: default;
+        }
+        .flow-step.active {
+            opacity: 1;
+            transform: scale(1);
+            background-color: #eef2ff;
+        }
+        .flow-step.complete {
+            background-color: #ecfdf5; /* emerald-50 */
+            border-left-color: #10b981;
+            color: #065f46;
+            opacity: 1;
+        }
+        .flow-step.current {
+            border-left-color: #6366f1;
+            color: #4338ca;
+            background-color: #eef2ff; /* indigo-50 */
+        }
+        .link-disabled {
+            pointer-events: none;
+            opacity: 0.6;
+            filter: grayscale(100%);
+        }
+        /* Custom styles for PDF content to ensure clean output by html2canvas */
+        #pdf-content-template {
+            background-color: white;
+            padding: 40px;
+            box-sizing: border-box;
+            font-family: 'Inter', sans-serif;
+        }
+        
+        /* Smooth progress bar transition */
+        .progress-bar {
+            transition: width 2s ease-in-out;
+        }
+
+        /* Fade in animation */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-fade-in {
+            animation: fadeIn 0.4s ease-out forwards;
+        }
+    </style>
+</head>
+<body class="antialiased">
+
+    <!-- Font Awesome Kit -->
+    <script src="https://kit.fontawesome.com/a9ed0d2d3a.js" crossorigin="anonymous"></script>
+
+    <!-- Header -->
+    <header class="bg-white border-b border-slate-200 sticky top-0 z-50 shadow-sm">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
+            <h1 class="text-2xl font-bold text-slate-900 tracking-tight">TaxGen <span class="text-indigo-600">v2.0</span></h1>
+            <p id="user-id-display" class="text-xs text-slate-500 hidden sm:block">User ID: Loading...</p>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 space-y-10">
+
+        <!-- Main Dashboard Section -->
+        <section id="dashboard" class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            
+            <!-- Left Column: Primary User Journey (7-Step Workflow) -->
+            <div class="lg:col-span-2 space-y-6">
+
+                <!-- Process Tracking Status (7-Step Workflow) -->
+                <div class="bg-white p-6 sm:p-8 rounded-2xl shadow-lg border border-slate-100 relative overflow-hidden">
+                    <div class="absolute top-0 right-0 w-32 h-32 bg-indigo-50 rounded-full blur-3xl -z-0 translate-x-10 -translate-y-10"></div>
+                    
+                    <h3 class="text-2xl font-bold text-slate-800 mb-6 relative z-10">7-Step AI E-Filing Preparation Flow</h3>
+                    
+                    <div id="process-timeline" class="space-y-4 relative z-10">
+                        
+                        <!-- Step 1: Secure Document Intake -->
+                        <div id="step-1" class="flow-step current p-4 rounded-xl border-l-4 border-indigo-600 bg-indigo-50 transition-all">
+                            <p class="font-semibold"><i class="fa-solid fa-file-arrow-up"></i> 1. Secure Document Intake</p>
+                            <p class="text-sm text-slate-600 mt-1">Upload Form 16, bank statements for AI data extraction and PII tokenization.</p>
+                            
+                            <!-- File Input Controls -->
+                            <div id="step-1-controls" class="mt-3">
+                                <input type="file" id="document-input" accept=".pdf" class="hidden" onchange="handleFileUpload()">
+                                <label for="document-input" id="file-label" class="flex items-center justify-center gap-3 p-3 bg-white text-indigo-600 rounded-lg cursor-pointer transition-colors hover:bg-indigo-50 hover:shadow-sm border border-indigo-200 hover:border-indigo-400 text-sm font-medium w-full sm:w-auto sm:inline-flex">
+                                    <i class="fa-solid fa-cloud-arrow-up"></i>
+                                    <span id="file-name-text">Select Document (PDF)</span>
+                                </label>
+                            </div>
+
+                            <!-- Upload Progress Animation (Hidden by default) -->
+                            <div id="upload-progress-container" class="hidden mt-3 space-y-2">
+                                <div class="flex justify-between text-xs font-semibold text-indigo-700">
+                                    <span>Scanning & Encrypting...</span>
+                                    <span id="upload-percentage">0%</span>
+                                </div>
+                                <div class="w-full bg-indigo-100 rounded-full h-2.5">
+                                    <div id="upload-progress-bar" class="bg-indigo-600 h-2.5 rounded-full progress-bar" style="width: 0%"></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Step 2: Form 26AS Grounding -->
+                        <div id="step-2" class="flow-step p-4 rounded-xl border-l-4 border-slate-300 bg-slate-50">
+                            <p class="font-semibold"><i class="fa-solid fa-database"></i> 2. Form 26AS Grounding & Verification</p>
+                            <p class="text-sm text-slate-600 mt-1">Verify TDS and Tax Payments against the official e-filing data source.</p>
+                            <button onclick="startStep(2)" class="mt-3 text-sm px-4 py-2 font-semibold text-white bg-indigo-500 rounded-md hover:bg-indigo-600 disabled:bg-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed transition-all shadow-sm hover:shadow-md flex items-center gap-2" disabled id="btn-step-2">
+                                <i class="fa-solid fa-check"></i> <span>Verify 26AS</span>
+                            </button>
+                            <p id="step-2-status" class="text-xs mt-2 text-slate-500 font-medium">Status: Awaiting Step 1 completion.</p>
+                        </div>
+
+                        <!-- Step 3: Deduction Optimization -->
+                        <div id="step-3" class="flow-step p-4 rounded-xl border-l-4 border-slate-300 bg-slate-50">
+                            <p class="font-semibold"><i class="fa-solid fa-wand-magic-sparkles"></i> 3. Deduction Optimization & Review</p>
+                            <p class="text-sm text-slate-600 mt-1">AI analyzes income to suggest optimal Chapter VI-A deductions.</p>
+                            <button onclick="startStep(3)" class="mt-3 text-sm px-4 py-2 font-semibold text-white bg-indigo-500 rounded-md hover:bg-indigo-600 disabled:bg-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed transition-all shadow-sm hover:shadow-md flex items-center gap-2" disabled id="btn-step-3">
+                                <i class="fa-solid fa-robot"></i> <span>AI Optimize Deductions</span>
+                            </button>
+                        </div>
+
+                        <!-- Step 4: Tax Liability Calculation -->
+                        <div id="step-4" class="flow-step p-4 rounded-xl border-l-4 border-slate-300 bg-slate-50">
+                            <p class="font-semibold"><i class="fa-solid fa-calculator"></i> 4. Final Tax Liability Calculation</p>
+                            <p class="text-sm text-slate-600 mt-1">Calculate final taxable income and determine liability or refund due.</p>
+                            <button onclick="startStep(4)" class="mt-3 text-sm px-4 py-2 font-semibold text-white bg-indigo-500 rounded-md hover:bg-indigo-600 disabled:bg-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed transition-all shadow-sm hover:shadow-md flex items-center gap-2" disabled id="btn-step-4">
+                                <i class="fa-solid fa-sort-numeric-up"></i> <span>Calculate Tax</span>
+                            </button>
+                        </div>
+
+                        <!-- Step 5: Draft ITR Generation -->
+                        <div id="step-5" class="flow-step p-4 rounded-xl border-l-4 border-slate-300 bg-slate-50">
+                            <p class="font-semibold"><i class="fa-solid fa-file-export"></i> 5. Draft ITR Generation (JSON/XML)</p>
+                            <p class="text-sm text-slate-600 mt-1">AI generates the final ITR file structure ready for e-filing upload.</p>
+                            <button onclick="startStep(5)" class="mt-3 text-sm px-4 py-2 font-semibold text-white bg-indigo-500 rounded-md hover:bg-indigo-600 disabled:bg-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed transition-all shadow-sm hover:shadow-md flex items-center gap-2" disabled id="btn-step-5">
+                                <i class="fa-solid fa-file-code"></i> <span>Generate ITR Draft</span>
+                            </button>
+                        </div>
+
+                        <!-- Step 6: Review & Download (PDF) -->
+                        <div id="step-6" class="flow-step p-4 rounded-xl border-l-4 border-slate-300 bg-slate-50">
+                            <p class="font-semibold"><i class="fa-solid fa-file-pdf"></i> 6. Review & Download (Summary PDF)</p>
+                            <p class="text-sm text-slate-600 mt-1">Download a user-friendly PDF summary of the ITR data for record keeping.</p>
+                            <button onclick="startStep(6)" class="mt-3 text-sm px-4 py-2 font-semibold text-white bg-emerald-500 rounded-md hover:bg-emerald-600 disabled:bg-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed transition-all shadow-sm hover:shadow-md flex items-center gap-2" disabled id="btn-step-6">
+                                <i class="fa-solid fa-download"></i> <span>Download Summary PDF</span>
+                            </button>
+                        </div>
+
+                        <!-- Step 7: E-Filing Portal Hand-off -->
+                        <div id="step-7" class="flow-step p-4 rounded-xl border-l-4 border-slate-300 bg-slate-50">
+                            <p class="font-semibold"><i class="fa-solid fa-link"></i> 7. E-Filing Portal Hand-off</p>
+                            <p class="text-sm text-slate-600 mt-1">Go to the official portal to upload your generated ITR file and E-Verify.</p>
+                            <a href="https://eportal.incometax.gov.in/" target="_blank" onclick="handlePortalLink(event)" role="button"
+                                class="mt-3 text-sm inline-flex items-center gap-2 px-4 py-2 font-bold text-white bg-rose-600 rounded-md hover:bg-rose-700 transition-all shadow-sm hover:shadow-md" 
+                                id="btn-step-7-link">
+                                <i class="fa-solid fa-arrow-up-right-from-square"></i> Go to Income Tax Portal
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Column: Status & Notifications -->
+            <div class="lg:col-span-1 space-y-8">
+                
+                <!-- Current Data Snapshot -->
+                <div class="bg-white p-6 rounded-2xl shadow-lg border border-slate-100 sticky top-24">
+                    <h3 class="text-xl font-bold text-slate-800 mb-4 flex items-center gap-2"><i class="fa-solid fa-chart-bar text-indigo-500"></i> Current Data Snapshot</h3>
+                    <div id="data-snapshot" class="space-y-4 text-sm">
+                        <!-- Content updated by renderDashboard() -->
+                        <div class="flex justify-between items-center pb-2 border-b border-slate-100">
+                            <span class="text-slate-600">Gross Income</span>
+                            <span class="text-indigo-600 font-bold bg-indigo-50 px-2 py-0.5 rounded">₹ 0</span>
+                        </div>
+                         <div class="flex justify-between items-center pb-2 border-b border-slate-100">
+                            <span class="text-slate-600">TDS Verified</span>
+                            <span class="text-indigo-600 font-bold bg-indigo-50 px-2 py-0.5 rounded">₹ 0</span>
+                        </div>
+                         <div class="flex justify-between items-center pb-2 border-b border-slate-100">
+                            <span class="text-slate-600">Deductions</span>
+                            <span class="text-emerald-600 font-bold bg-emerald-50 px-2 py-0.5 rounded">₹ 0</span>
+                        </div>
+                        <div class="pt-2">
+                            <span class="text-lg font-bold block mb-1">Tax Liability</span>
+                            <span class="text-slate-400 font-bold text-lg">Pending</span>
+                        </div>
+                    </div>
+                    <div id="ai-advice-box" class="mt-5 p-4 bg-indigo-50 rounded-xl border border-indigo-100 text-sm text-indigo-800 hidden animate-fade-in">
+                        <strong><i class="fa-solid fa-robot mr-1"></i> AI Insight:</strong> <span id="ai-advice-text" class="block mt-1 opacity-90"></span>
+                    </div>
+                </div>
+
+                <!-- Notification Area -->
+                <div id="notification-area" class="space-y-3 pointer-events-none fixed bottom-6 right-6 w-80 z-[100] flex flex-col items-end">
+                    <!-- Messages will be injected here -->
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- Hidden element for PDF generation (Content is dynamically injected) -->
+    <div style="position: absolute; left: -9999px; top: 0; width: 800px;">
+        <div id="pdf-content-template" class="bg-white p-10 text-slate-800">
+            <!-- Dynamic PDF content will be injected here by updatePdfContentTemplate() -->
+        </div>
+    </div>
+
+
+    <script>
+        // --- CONFIGURATION ---
+        const apiKey = "AIzaSyABv7a8ymmKmzzuEk9O68Jnr-Sln_fMt_E"; // User provided key
+
+        const STEPS = [
+            'step-1', 'step-2', 'step-3', 'step-4', 'step-5', 'step-6', 'step-7'
+        ];
+        
+        // Simulated ITR data structure (will be persisted in Firestore)
+        let ITR_DATA = {
+            step: 0, // Start at 0, first save sets to 1
+            fileName: 'No file uploaded',
+            grossIncome: 0,
+            tdsVerified: 0,
+            deductionsClaimed: 0,
+            aiReasoning: '', // New field for AI text
+            finalTaxResult: 'Pending'
+        };
+
+        const FIREBASE_STATUS = {
+            ready: false,
+            itrDocRef: null
+        };
+
+        // --- GEMINI API HELPER ---
+        async function callGeminiAPI(prompt, systemInstruction = "") {
+            // Check if key exists
+            if (!apiKey) {
+                console.warn("API Key is empty. Falling back to simulation logic.");
+                return null;
+            }
+
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+            
+            const payload = {
+                contents: [{ parts: [{ text: prompt }] }],
+                systemInstruction: { parts: [{ text: systemInstruction }] },
+                generationConfig: {
+                    responseMimeType: "application/json" // Force structured output
+                }
+            };
+
+            const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+            
+            for (let i = 0; i < 3; i++) { // Retry up to 3 times
+                try {
+                    const response = await fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (!response.ok) throw new Error(`API Error: ${response.status}`);
+
+                    const data = await response.json();
+                    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+                    return JSON.parse(text); // Return parsed JSON
+
+                } catch (error) {
+                    console.warn(`Gemini API attempt ${i + 1} failed:`, error);
+                    if (i === 2) return null; // Return null on final failure
+                    await delay(1000 * Math.pow(2, i)); // Exponential backoff
+                }
+            }
+        }
+
+        // --- FIREBASE DEPENDENT LOGIC ---
+        function initFirebaseDependentLogic() {
+            // Access functions from window (globally exposed by the module script)
+            const { onSnapshot, setDoc, doc, userId, ITR_DOC_REF, db } = window; 
+
+            if (db && userId && onSnapshot && setDoc && doc && ITR_DOC_REF) {
+                FIREBASE_STATUS.ready = true;
+                FIREBASE_STATUS.itrDocRef = ITR_DOC_REF;
+                document.getElementById('user-id-display').textContent = 'User ID: ' + userId.substring(0, 8) + '...';
+                
+                // Start listening to the document for real-time updates
+                onSnapshot(FIREBASE_STATUS.itrDocRef, (docSnap) => {
+                    if (docSnap.exists()) {
+                        // Load and merge data from Firestore
+                        const loadedData = docSnap.data();
+                        ITR_DATA = { ...ITR_DATA, ...loadedData };
+                        console.log("Current ITR Data from Firestore:", ITR_DATA);
+                        renderDashboard();
+                    } else if (ITR_DATA.step === 0) {
+                        // Initialize document only if local state is default (step 0)
+                        console.log("Initializing new ITR document.");
+                        saveProgress(1, ITR_DATA);
+                    } else {
+                        // If it doesn't exist but we already have local state, just render
+                        renderDashboard();
+                    }
+                }, (error) => {
+                    console.error("Firestore Snapshot Listener Error:", error);
+                    showNotification('Error loading data. Please refresh.', 'bg-rose-100', 'text-rose-800');
+                    renderDashboard(); // Fallback render
+                });
+            } else {
+                console.error("Firebase resources (db, userId, ITR_DOC_REF) are not ready.");
+                renderDashboard(); // Render with defaults if Firebase failed
+            }
+        }
+
+
+        async function saveProgress(stepNum, data) {
+            // Ensure step is part of the saved data
+            const newData = { ...ITR_DATA, ...data, step: stepNum };
+            ITR_DATA = newData; // Update local state immediately
+            
+            // IMPORTANT: Optimistically render dashboard immediately.
+            // This prevents UI stalling if Firestore is slow or not ready.
+            renderDashboard();
+
+            if (!FIREBASE_STATUS.ready || !window.setDoc) {
+                console.warn("Firestore not ready or setDoc is unavailable. State not saved remotely.");
+                return;
+            }
+            
+            try {
+                // Use setDoc from the global scope
+                await window.setDoc(FIREBASE_STATUS.itrDocRef, ITR_DATA);
+                console.log(`Progress saved at Step ${stepNum}.`);
+            } catch (e) {
+                console.error("Error saving document:", e);
+                // Note: We don't revert ITR_DATA to keep UI responsive
+                showNotification('Could not save progress cloud. Check console.', 'bg-rose-100', 'text-rose-800');
+            }
+        }
+
+
+        // --- UI & STATE RENDERING ---
+
+        function renderDashboard() {
+            // 1. Update Flow Status
+            const currentStep = ITR_DATA.step;
+            STEPS.forEach((id, index) => {
+                const stepElement = document.getElementById(id);
+                const stepNumber = index + 1;
+                stepElement.classList.remove('current', 'complete', 'active', 'border-indigo-600', 'bg-indigo-50', 'border-emerald-600', 'bg-emerald-50', 'border-slate-300', 'bg-slate-50', 'opacity-100', 'opacity-60');
+
+                if (stepNumber < currentStep) {
+                    stepElement.classList.add('complete');
+                } else if (stepNumber === currentStep) {
+                    stepElement.classList.add('current', 'active');
+                } else {
+                    stepElement.classList.add('border-slate-300', 'bg-slate-50', 'opacity-60');
+                }
+            });
+
+            // 2. Control Button Enabling
+            for (let i = 2; i <= 6; i++) {
+                const btn = document.getElementById(`btn-step-${i}`);
+                if (btn) {
+                    if (i > currentStep) {
+                        btn.disabled = true;
+                    } else {
+                        // Only enable if it's the current step or previous (to retry? usually just current)
+                        // For this linear flow, typically only enable the button for the current step action
+                        btn.disabled = (i !== currentStep);
+                        // However, if we want to allow re-running previous steps, we could change logic.
+                        // Here we keep strict forward progress:
+                        if (i < currentStep) {
+                            btn.disabled = true; // Disable completed steps
+                            btn.innerHTML = `<i class="fa-solid fa-check-circle"></i> Completed`;
+                            btn.classList.add('bg-emerald-500', 'hover:bg-emerald-600');
+                            btn.classList.remove('bg-indigo-500', 'hover:bg-indigo-600');
+                        }
+                    }
+                }
+            }
+            
+            // 3. Step 7 Link Control (Link should only be active when step 7 is reached)
+            const linkBtn = document.getElementById('btn-step-7-link');
+            if (currentStep >= 7) {
+                linkBtn.classList.remove('link-disabled');
+            } else {
+                linkBtn.classList.add('link-disabled');
+            }
+
+
+            // 4. Update Data Snapshot
+            const isRefund = ITR_DATA.finalTaxResult.includes('(REFUND)');
+            const taxResultColor = isRefund ? 'text-emerald-600' : (ITR_DATA.finalTaxResult === 'Pending' ? 'text-slate-400' : 'text-rose-600');
+
+            // Format numbers for display
+            const formatCurrency = (amount) => (amount || 0).toLocaleString('en-IN');
+
+            const snapshotDiv = document.getElementById('data-snapshot');
+            snapshotDiv.innerHTML = `
+                <div class="flex justify-between items-center pb-2 border-b border-slate-100">
+                    <span class="text-slate-600">Gross Income</span>
+                    <span class="text-indigo-600 font-bold bg-indigo-50 px-2 py-0.5 rounded">₹ ${formatCurrency(ITR_DATA.grossIncome)}</span>
+                </div>
+                 <div class="flex justify-between items-center pb-2 border-b border-slate-100">
+                    <span class="text-slate-600">TDS Verified</span>
+                    <span class="text-indigo-600 font-bold bg-indigo-50 px-2 py-0.5 rounded">₹ ${formatCurrency(ITR_DATA.tdsVerified)}</span>
+                </div>
+                 <div class="flex justify-between items-center pb-2 border-b border-slate-100">
+                    <span class="text-slate-600">Deductions</span>
+                    <span class="text-emerald-600 font-bold bg-emerald-50 px-2 py-0.5 rounded">₹ ${formatCurrency(ITR_DATA.deductionsClaimed)}</span>
+                </div>
+                <div class="pt-2">
+                    <span class="text-lg font-bold block mb-1 text-slate-700">Tax Liability</span>
+                    <span class="${taxResultColor} font-bold text-lg block">${ITR_DATA.finalTaxResult}</span>
+                </div>
+            `;
+            // Update Step 1 file display
+            const fileNameEl = document.getElementById('file-name-text');
+            if (ITR_DATA.fileName !== 'No file uploaded') {
+                 fileNameEl.innerHTML = `<strong>${ITR_DATA.fileName}</strong> <span class="text-xs ml-1 text-emerald-600">(Uploaded)</span>`;
+                 document.getElementById('file-label').classList.add('bg-emerald-50', 'border-emerald-200', 'text-emerald-700');
+            }
+
+            // Update AI Insight Box
+            const adviceBox = document.getElementById('ai-advice-box');
+            const adviceText = document.getElementById('ai-advice-text');
+            if (ITR_DATA.aiReasoning) {
+                adviceBox.classList.remove('hidden');
+                adviceText.textContent = ITR_DATA.aiReasoning;
+            } else {
+                adviceBox.classList.add('hidden');
+            }
+        }
+
+
+        // --- CORE WORKFLOW LOGIC ---
+
+        function handleFileUpload() {
+            const input = document.getElementById('document-input');
+            if (input.files.length > 0) {
+                const name = input.files[0].name;
+                
+                // UI: Reset button style temporarily
+                const label = document.getElementById('file-label');
+                label.classList.add('pointer-events-none'); // Disable clicks
+                
+                // Show Progress Bar
+                const progressContainer = document.getElementById('upload-progress-container');
+                const progressBar = document.getElementById('upload-progress-bar');
+                const progressPercent = document.getElementById('upload-percentage');
+                
+                progressContainer.classList.remove('hidden');
+                
+                // Animate Progress
+                setTimeout(() => { progressBar.style.width = '40%'; progressPercent.textContent = '40%'; }, 100);
+                setTimeout(() => { progressBar.style.width = '75%'; progressPercent.textContent = '75%'; }, 800);
+                setTimeout(() => { progressBar.style.width = '100%'; progressPercent.textContent = '100%'; }, 1500);
+
+                // Completion
+                setTimeout(() => {
+                    progressContainer.classList.add('hidden');
+                    progressBar.style.width = '0%'; // Reset for next time
+                    label.classList.remove('pointer-events-none');
+                    
+                    showNotification(`Document "${name}" processed. AI extraction complete.`, 'bg-emerald-100', 'text-emerald-800');
+                    
+                    // Logic Update
+                    const resetData = {
+                        grossIncome: 1850000, // Simulated extraction
+                        fileName: name,
+                        tdsVerified: 0,
+                        deductionsClaimed: 0,
+                        aiReasoning: '',
+                        finalTaxResult: 'Pending'
+                    };
+                    saveProgress(2, resetData);
+
+                }, 2000);
+            }
+        }
+
+        // Helper to handle loading states for buttons
+        function setButtonLoading(stepId, isLoading, originalText = "") {
+            const btn = document.getElementById(`btn-step-${stepId}`);
+            if (!btn) return;
+
+            if (isLoading) {
+                btn.dataset.originalText = btn.innerHTML; // Store original html
+                btn.disabled = true;
+                btn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Processing...`;
+                btn.classList.add('opacity-75', 'cursor-wait');
+            } else {
+                btn.disabled = false; // Note: logic in renderDashboard might re-disable it if needed
+                btn.innerHTML = originalText || btn.dataset.originalText;
+                btn.classList.remove('opacity-75', 'cursor-wait');
+            }
+        }
+
+        function handlePortalLink(event) {
+            if (ITR_DATA.step < 7) {
+                event.preventDefault(); // Prevent navigation if not ready
+                showNotification('You must complete Step 6 before proceeding to the E-Filing Portal.', 'bg-rose-100', 'text-rose-800');
+            } else {
+                showNotification('Opening E-Filing Portal in a new tab...', 'bg-indigo-100', 'text-indigo-800');
+            }
+        }
+
+        async function startStep(stepNumber) {
+            // Guard clause
+            if (stepNumber > ITR_DATA.step) return;
+            if (stepNumber === 7) return; 
+
+            // Set UI to loading state
+            setButtonLoading(stepNumber, true);
+            
+            try {
+                let newData = {};
+                let nextStep = stepNumber + 1;
+                let message = `Step ${stepNumber} completed. Proceeding to Step ${nextStep}.`;
+
+                const grossIncome = ITR_DATA.grossIncome || 1850000;
+                const standardDeduction = 50000;
+                
+                // Logic Switching
+                switch (stepNumber) {
+                    case 2: // 26AS Verification
+                        await new Promise(r => setTimeout(r, 2000)); // Simulate network delay
+                        newData = { tdsVerified: 260000 }; 
+                        message = '26AS Verification SUCCESS: TDS verified. Proceed to Step 3.';
+                        document.getElementById('step-2-status').textContent = 'Status: Verified & Matched.';
+                        break;
+                    
+                    case 3: // Deduction Optimization
+                        showNotification('AI analyzing income for tax savings...', 'bg-indigo-100', 'text-indigo-800');
+                        
+                        const optimizationPrompt = `
+                            Analyze tax optimization for Indian Tax Regime (Old Regime). 
+                            Gross Income: ${grossIncome}. 
+                            Standard Deduction: ${standardDeduction}.
+                            Suggest a realistic total deduction amount under Section 80C, 80D, etc. to maximize savings.
+                            Return strict JSON: { "suggestedDeductions": number, "reasoning": "string (max 15 words)" }
+                        `;
+
+                        try {
+                            const aiResult = await callGeminiAPI(optimizationPrompt, "You are an Indian Tax Expert. Return ONLY JSON.");
+                            if (aiResult) {
+                                newData = { 
+                                    deductionsClaimed: aiResult.suggestedDeductions || 200000, 
+                                    aiReasoning: aiResult.reasoning || "AI Optimized based on standard 80C+80D limits."
+                                };
+                            } else {
+                                throw new Error("AI Fallback");
+                            }
+                        } catch (e) {
+                            newData = { deductionsClaimed: 200000, aiReasoning: "Standard optimization applied (Offline Mode)." };
+                        }
+                        message = `Deductions set to ₹ ${(newData.deductionsClaimed || 200000).toLocaleString('en-IN')}.`;
+                        break;
+
+                    case 4: // Tax Calculation
+                        await new Promise(r => setTimeout(r, 1500));
+                        const deductions = ITR_DATA.deductionsClaimed || 200000;
+                        const taxableIncome = grossIncome - standardDeduction - deductions;
+                        // Simplified Tax Logic
+                        const taxLiability = 254800; // Simplified fixed calc for demo
+                        const netResult = (ITR_DATA.tdsVerified || 260000) - taxLiability; 
+
+                        if (netResult >= 0) {
+                            newData = { finalTaxResult: `₹ ${Math.abs(netResult).toLocaleString('en-IN')} (REFUND)` };
+                            message = `Refund of ₹ ${Math.abs(netResult).toLocaleString('en-IN')} calculated.`;
+                        } else {
+                            newData = { finalTaxResult: `₹ ${Math.abs(netResult).toLocaleString('en-IN')} (PAYABLE)` };
+                            message = `Tax Payable: ₹ ${Math.abs(netResult).toLocaleString('en-IN')}.`;
+                        }
+                        break;
+
+                    case 5: // Draft ITR Generation
+                        showNotification('Generating ITR Schema...', 'bg-indigo-100', 'text-indigo-800');
+                        await new Promise(r => setTimeout(r, 1500)); // Simulate generation time
+                        message = 'ITR Draft (JSON/XML) generated successfully.';
+                        break;
+
+                    case 6: // Review & Download PDF
+                        await generateITRPDF(); 
+                        message = 'Summary PDF downloaded.';
+                        nextStep = 7;
+                        break;
+                }
+
+                if (stepNumber < 7) {
+                    await saveProgress(nextStep, newData);
+                }
+                showNotification(message, 'bg-emerald-100', 'text-emerald-800');
+
+            } catch (error) {
+                console.error("Step Error:", error);
+                showNotification('An error occurred. Please try again.', 'bg-rose-100', 'text-rose-800');
+            } finally {
+                // IMPORTANT: Logic to resolve conflict between disabled state and completed state
+                // Only reset loading if we are STILL on the same step (meaning error or logic failure)
+                // If ITR_DATA.step has advanced, renderDashboard() has already styled the button as "Completed".
+                // We must NOT overwrite that with setButtonLoading(false).
+                if (ITR_DATA.step === stepNumber) {
+                     setButtonLoading(stepNumber, false);
+                }
+            }
+        }
+        
+        // --- PDF CONTENT GENERATION ---
+        function updatePdfContentTemplate() {
+            const data = ITR_DATA;
+            const pan = 'XXXXX1234X'; 
+            const aadhaar = 'XXXXXXXX1234';
+            const name = 'John Doe (Simulated)'; 
+            const ay = '2024-25';
+            const itrForm = 'ITR-1 (Sahaj)';
+
+            const grossIncome = data.grossIncome || 0;
+            const standardDeduction = 50000;
+            const deductionsClaimed = data.deductionsClaimed || 0;
+            const tdsVerified = data.tdsVerified || 0;
+
+            const taxableIncome = grossIncome - standardDeduction - deductionsClaimed;
+            const taxLiability = 254800; // Consistent with Step 4
+            const netPayableOrRefund = tdsVerified - taxLiability;
+
+            let finalResultText = `₹ ${Math.abs(netPayableOrRefund).toLocaleString('en-IN')}`;
+            let finalResultRowText = 'NET TAX LIABILITY/REFUND';
+            let finalResultClass = 'bg-slate-100';
+
+            if (netPayableOrRefund > 0) {
+                finalResultRowText = 'NET REFUND DUE';
+                finalResultClass = 'bg-emerald-100 font-bold';
+            } else if (netPayableOrRefund < 0) {
+                finalResultRowText = 'NET TAX PAYABLE';
+                finalResultClass = 'bg-rose-100 font-bold';
+            } else {
+                finalResultText = `NIL`;
+                finalResultRowText = 'NIL TAX LIABILITY';
+                finalResultClass = 'bg-indigo-100 font-bold';
+            }
+            
+            const template = document.getElementById('pdf-content-template');
+            template.innerHTML = `
+                <div class="flex justify-between items-center mb-6">
+                    <h1 class="text-3xl font-bold text-slate-900">TaxGen AI <span class="text-indigo-600">Summary</span></h1>
+                    <div class="text-right">
+                        <p class="text-sm text-slate-500">Assessment Year</p>
+                        <p class="font-bold text-slate-800">${ay}</p>
+                    </div>
+                </div>
+                <hr class="border-2 border-indigo-600 mb-8">
+                <div class="grid grid-cols-2 gap-8 mb-8">
+                    <div class="p-4 bg-slate-50 rounded-lg">
+                        <h2 class="text-lg font-bold text-indigo-700 mb-3 border-b border-indigo-200 pb-1">Personal Details</h2>
+                        <p class="mb-1"><strong class="text-slate-600 w-24 inline-block">Name:</strong> ${name}</p>
+                        <p class="mb-1"><strong class="text-slate-600 w-24 inline-block">PAN:</strong> ${pan}</p>
+                        <p class="mb-1"><strong class="text-slate-600 w-24 inline-block">Aadhaar:</strong> ${aadhaar}</p>
+                    </div>
+                    <div class="p-4 bg-slate-50 rounded-lg">
+                        <h2 class="text-lg font-bold text-indigo-700 mb-3 border-b border-indigo-200 pb-1">Filing Status</h2>
+                        <p class="mb-1"><strong class="text-slate-600 w-32 inline-block">Form:</strong> ${itrForm}</p>
+                        <p class="mb-1"><strong class="text-slate-600 w-32 inline-block">Date:</strong> ${new Date().toLocaleDateString()}</p>
+                        <p class="mb-1"><strong class="text-slate-600 w-32 inline-block">Generated By:</strong> TaxGen AI v2.0</p>
+                    </div>
+                </div>
+
+                <h2 class="text-xl font-bold text-slate-800 mb-4">Financial Computation</h2>
+                <table class="w-full border-collapse text-sm mb-6">
+                    <thead>
+                        <tr class="bg-slate-800 text-white">
+                            <th class="p-3 text-left rounded-tl-lg">Description</th>
+                            <th class="p-3 text-right rounded-tr-lg">Amount (₹)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr class="border-b border-slate-200"><td class="p-3">Gross Salary / Income</td><td class="p-3 text-right font-medium">${grossIncome.toLocaleString('en-IN')}</td></tr>
+                        <tr class="border-b border-slate-200"><td class="p-3 text-slate-600 pl-6">Less: Standard Deduction</td><td class="p-3 text-right text-rose-600">(${standardDeduction.toLocaleString('en-IN')})</td></tr>
+                        <tr class="border-b border-slate-200"><td class="p-3 text-slate-600 pl-6">Less: Deductions (Chapter VI-A)</td><td class="p-3 text-right text-rose-600">(${deductionsClaimed.toLocaleString('en-IN')})</td></tr>
+                        <tr class="bg-indigo-50 font-bold border-b border-indigo-200"><td class="p-3">TOTAL TAXABLE INCOME</td><td class="p-3 text-right text-indigo-900">${taxableIncome.toLocaleString('en-IN')}</td></tr>
+                        <tr class="border-b border-slate-200"><td class="p-3">Tax Calculated on above</td><td class="p-3 text-right">${taxLiability.toLocaleString('en-IN')}</td></tr>
+                        <tr class="border-b border-slate-200"><td class="p-3 text-slate-600 pl-6">Less: TDS Paid (Verified)</td><td class="p-3 text-right text-emerald-600">(${tdsVerified.toLocaleString('en-IN')})</td></tr>
+                        <tr class="${finalResultClass}"><td class="p-4 text-base">${finalResultRowText}</td><td class="p-4 text-right text-base">${finalResultText}</td></tr>
+                    </tbody>
+                </table>
+                
+                ${data.aiReasoning ? `<div class="mt-6 p-4 bg-blue-50 border-l-4 border-blue-400 rounded-r text-sm text-blue-900"><strong><i class="fa-solid fa-robot"></i> AI Note:</strong> ${data.aiReasoning}</div>` : ''}
+
+                <div class="mt-10 pt-4 border-t border-slate-200 text-center text-xs text-slate-400">
+                    <p>This document is computer generated by TaxGen AI v2.0. Not for official legal use without verification.</p>
+                </div>
+            `;
+        }
+
+        async function generateITRPDF() {
+            updatePdfContentTemplate(); 
+            const pdfContent = document.getElementById('pdf-content-template');
+            
+            try {
+                const canvas = await html2canvas(pdfContent, { scale: 2, logging: false });
+                const imgData = canvas.toDataURL('image/png');
+                const { jsPDF } = window.jspdf;
+                const pdf = new jsPDF('p', 'mm', 'a4');
+                const imgWidth = 210; 
+                const pageHeight = 295; 
+                const imgHeight = canvas.height * imgWidth / canvas.width;
+                let heightLeft = imgHeight;
+                let position = 0;
+
+                pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+                heightLeft -= pageHeight;
+
+                while (heightLeft > 0) {
+                    position = heightLeft - imgHeight;
+                    pdf.addPage();
+                    pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+                    heightLeft -= pageHeight;
+                }
+                pdf.save('TaxGen_ITR_Summary.pdf');
+            } catch (error) {
+                console.error("PDF Generation Error:", error);
+                showNotification("Failed to generate PDF. Try again.", "bg-rose-100", "text-rose-800");
+            }
+        }
+
+        // --- UTILITY ---
+        function showNotification(message, bgClass, textClass) {
+            const notificationArea = document.getElementById('notification-area');
+            const newNotification = document.createElement('div');
+            newNotification.className = `p-4 w-full ${bgClass} border ${bgClass.replace('bg-', 'border-').replace('100', '200')} ${textClass} rounded-xl flex items-center gap-3 shadow-md animate-fade-in pointer-events-auto backdrop-blur-sm`;
+            newNotification.innerHTML = `<i class="fa-solid fa-circle-info text-lg"></i><p class="font-semibold text-sm leading-tight">${message}</p>`;
+            
+            notificationArea.appendChild(newNotification); // Append to bottom of stack
+
+            // Auto-fade out
+            setTimeout(() => {
+                newNotification.style.transition = 'all 0.5s ease';
+                newNotification.style.opacity = '0';
+                newNotification.style.transform = 'translateX(20px)';
+                setTimeout(() => newNotification.remove(), 500);
+            }, 5000);
+        }
+
+        // Initialize on load
+        window.onload = () => {
+             // Check if Firebase data is ready before initializing state
+            if (window.firebaseReady) {
+                window.firebaseReady.then(() => {
+                    initFirebaseDependentLogic(); 
+                }).catch(e => {
+                    console.error("Error during Firebase readiness check:", e);
+                    renderDashboard();
+                });
+            } else {
+                console.warn("window.firebaseReady is undefined. Rendering dashboard immediately.");
+                renderDashboard();
+            }
+        };
+    </script>
+</body>
+</html>
